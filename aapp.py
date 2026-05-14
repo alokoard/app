@@ -1,122 +1,107 @@
 import streamlit as st
 import pandas as pd
-from ortools.constraint_solver import routing_enums_pb2
-from ortools.constraint_solver import pywrapcp
-import math
+import numpy as np
 
-# --- KONFIGURATION & STYLING ---
-st.set_page_config(page_title="Textilia Gbg Logistik", layout="wide")
-st.title("🚛 Textilia Gbg: Ruttplanering")
+# --- Sidinställningar ---
+st.set_page_config(page_title="Ruttplanerare Pro - Tvätteri", layout="wide")
+st.title("🚛 Ruttplanerare Pro: Massplanering & Karta")
 
-# Initiera session state för att spara adresser under körning
-if 'stops' not in st.session_state:
-    st.session_state.stops = []
-
-# --- SIDEBAR: FORDONSFLOTTA ---
-st.sidebar.header("🚚 Dagens Fordon")
-heavy_trucks = st.sidebar.number_input("Antal Lastbilar (12 vagnar)", min_value=0, value=2)
-light_trucks = st.sidebar.number_input("Antal Lätta Lastbilar (6 vagnar)", min_value=0, value=1)
-
-vehicle_capacities = ([12] * heavy_trucks) + ([6] * light_trucks)
-num_vehicles = len(vehicle_capacities)
-
-# --- INPUT: LÄGG TILL ADRESSER ---
-st.subheader("1. Mata in dagens leveranser")
-with st.form("address_form"):
-    col1, col2, col3 = st.columns([3, 1, 1])
-    with col1:
-        addr = st.text_input("Adress/Kundnamn")
-    with col2:
-        out_carts = st.number_input("Rena vagnar UT", min_value=0, step=1)
-    with col3:
-        in_carts = st.number_input("Smutsiga vagnar IN", min_value=0, step=1)
+# --- Logik för ruttberäkning ---
+def calculate_routes(stops, vehicle_caps):
+    remaining = stops.copy()
+    all_routes = []
     
-    # För demonstration använder vi enkla koordinater (X, Y) 
-    # I en produktion-app ersätts detta av Google Maps API
-    submitted = st.form_submit_button("Lägg till stopp")
-    if submitted and addr:
-        # Vi simulerar koordinater för Göteborgsområdet för logiken
-        st.session_state.stops.append({
-            "name": addr, 
-            "demand": max(out_carts, in_carts), # Kapacitet som krävs
-            "x": len(st.session_state.stops) * 2, # Dummy-koordinat
-            "y": (len(st.session_state.stops) % 3) * 5 # Dummy-koordinat
-        })
-
-if st.session_state.stops:
-    st.write(f"Antal stopp inlagda: **{len(st.session_state.stops)}**")
-    if st.button("Rensa alla stopp"):
-        st.session_state.stops = []
-        st.rerun()
-
-# --- OPTIMERINGSMOTOR (OR-TOOLS) ---
-def solve_routing(stops, capacities):
-    if not stops or not capacities: return None
-    
-    # Skapa distansmatris (Euclidiskt avstånd för demo)
-    all_points = [{"name": "Tvätteriet", "x": 0, "y": 0}] + stops
-    dist_matrix = []
-    for p1 in all_points:
-        row = []
-        for p2 in all_points:
-            dist = math.sqrt((p1['x'] - p2['x'])**2 + (p1['y'] - p2['y'])**2)
-            row.append(int(dist * 100)) # OR-Tools gillar heltal
-        dist_matrix.append(row)
-
-    # Data modell
-    data = {
-        'distance_matrix': dist_matrix,
-        'demands': [0] + [s['demand'] for s in stops],
-        'vehicle_capacities': capacities,
-        'num_vehicles': len(capacities),
-        'depot': 0
-    }
-
-    manager = pywrapcp.RoutingIndexManager(len(data['distance_matrix']), data['num_vehicles'], data['depot'])
-    routing = pywrapcp.RoutingModel(manager)
-
-    def distance_callback(from_index, to_index):
-        return data['distance_matrix'][manager.IndexToNode(from_index)][manager.IndexToNode(to_index)]
-
-    transit_callback_index = routing.RegisterTransitCallback(distance_callback)
-    routing.SetArcCostEvaluatorOfAllVehicles(transit_callback_index)
-
-    def demand_callback(from_index):
-        return data['demands'][manager.IndexToNode(from_index)]
-
-    demand_callback_index = routing.RegisterUnaryTransitCallback(demand_callback)
-    routing.AddDimensionWithVehicleCapacity(demand_callback_index, 0, data['vehicle_capacities'], True, 'Capacity')
-
-    search_params = pywrapcp.DefaultRoutingSearchParameters()
-    search_params.first_solution_strategy = (routing_enums_pb2.FirstSolutionStrategy.PATH_CHEAPEST_ARC)
-    
-    return routing.SolveWithParameters(search_params), manager, routing, all_points
-
-# --- DISPLAY RESULTAT ---
-if st.button("🚀 Beräkna optimala rutter", type="primary"):
-    if len(st.session_state.stops) > 0:
-        solution, manager, routing, all_points = solve_routing(st.session_state.stops, vehicle_capacities)
+    for cap in vehicle_caps:
+        if not remaining: break
+        current_route = []
+        current_load = 0
+        # Startposition (Tvätteriet - Göteborg Centrum ca)
+        curr_lat, curr_lon = 57.7089, 11.9746 
         
-        if solution:
-            st.success("Rutter optimerade!")
-            for vehicle_id in range(num_vehicles):
-                index = routing.Start(vehicle_id)
-                plan = []
-                while not routing.IsEnd(index):
-                    node_index = manager.IndexToNode(index)
-                    plan.append(all_points[node_index]['name'])
-                    index = solution.Value(routing.NextVar(index))
-                plan.append("Tvätteriet")
-                
-                if len(plan) > 2: # Visa endast bilar som faktiskt kör
-                    with st.expander(f"📋 Körlista: Fordon {vehicle_id + 1} ({'Lastbil' if vehicle_capacities[vehicle_id]>6 else 'Lätt lastbil'})"):
-                        for i, stop in enumerate(plan):
-                            st.write(f"**{i+1}. {stop}**")
-                        
-                        # Text för att enkelt kopiera
-                        copy_text = " -> ".join(plan)
-                        st.text_area("Kopiera rutt:", copy_text, key=f"text_{vehicle_id}")
-        else:
-            st.error("Kunde inte hitta en lösning. Kontrollera att bilarnas kapacitet räcker till.")
+        while remaining:
+            # Hitta närmsta stopp
+            dists = [np.sqrt((s['lat']-curr_lat)**2 + (s['lon']-curr_lon)**2) for s in remaining]
+            nearest_idx = np.argmin(dists)
+            nearest_stop = remaining[nearest_idx]
+            
+            if current_load + nearest_stop['demand'] <= cap:
+                current_route.append(nearest_stop)
+                current_load += nearest_stop['demand']
+                curr_lat, curr_lon = nearest_stop['lat'], nearest_stop['lon']
+                remaining.pop(nearest_idx)
+            else:
+                break
+        all_routes.append(current_route)
+    return all_routes, remaining
+
+# --- Sidebar: Fordon ---
+st.sidebar.header("🚚 Fordonsflotta")
+stora = st.sidebar.number_input("Lastbilar (12 vagnar)", 0, 10, 2)
+sma = st.sidebar.number_input("Lätta lastbilar (6 vagnar)", 0, 10, 1)
+v_caps = ([12] * stora) + ([6] * sma)
+
+# --- Huvudfönster: Massinmatning ---
+st.subheader("1. Klistra in adresser")
+st.info("Format: Namn, Ut, In (en per rad). Exempel: Hotell Gothia, 5, 5")
+bulk_input = st.text_area("Adresslista", height=200, placeholder="Gothia Towers, 5, 5\nRestaurang Linné, 2, 2\nSahlgrenska, 10, 8")
+
+if st.button("🚀 Planera och optimera rutter", type="primary"):
+    if bulk_input:
+        processed_stops = []
+        lines = bulk_input.split('\n')
+        
+        for i, line in enumerate(lines):
+            if ',' in line:
+                parts = line.split(',')
+                try:
+                    name = parts[0].strip()
+                    out_v = int(parts[1].strip())
+                    in_v = int(parts[2].strip())
+                    # Slumpa koordinater runt Gbg för kartan
+                    lat = 57.70 + np.random.uniform(-0.05, 0.05)
+                    lon = 11.97 + np.random.uniform(-0.05, 0.05)
+                    processed_stops.append({"name": name, "demand": max(out_v, in_v), "lat": lat, "lon": lon})
+                except:
+                    st.error(f"Kunde inte läsa rad: {line}")
+
+        if processed_stops:
+            routes, left_over = calculate_routes(processed_stops, v_caps)
+            
+            # --- VISUALISERING: KARTA ---
+            st.subheader("2. Kartöversikt")
+            map_data = []
+            for i, r in enumerate(routes):
+                for stop in r:
+                    map_data.append({"lat": stop['lat'], "lon": stop['lon'], "Bil": f"Bil {i+1}"})
+            
+            if map_data:
+                df_map = pd.DataFrame(map_data)
+                st.map(df_map, color="#FF4B4B" if len(routes) > 0 else "#000000")
+            
+            # --- KÖRLISTOR ---
+            st.subheader("3. Färdiga Körlistor")
+            cols = st.columns(len([r for r in routes if r]))
+            
+            for i, r in enumerate(routes):
+                if not r: continue
+                with cols[i % len(cols)]:
+                    st.success(f"**BIL {i+1} ({'Stor' if v_caps[i]==12 else 'Liten'})**")
+                    st.write("📍 *Start: Tvätteriet*")
+                    for j, s in enumerate(r):
+                        st.write(f"{j+1}. **{s['name']}** ({s['demand']} vagn)")
+                    st.write("🏁 *Mål: Tvätteriet*")
+                    
+                    # SMS-knapp/text
+                    sms_list = [s['name'] for s in r]
+                    st.text_area(f"Kopiera SMS Bil {i+1}", f"RUTT BIL {i+1}: Start -> " + " -> ".join(sms_list) + " -> Mål", height=100)
+            
+            if left_over:
+                st.warning(f"⚠️ {len(left_over)} stopp fick inte plats! Lägg till fler bilar.")
     else:
-        st.warning("Lägg till adresser först!")
+        st.error("Klistra in adresser först!")
+
+# --- VIKTIGT FÖR ATT DET SKA FUNKA ---
+# Se till att din requirements.txt bara innehåller:
+# streamlit
+# pandas
+# numpy
