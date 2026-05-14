@@ -2,106 +2,85 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 
-# --- Sidinställningar ---
-st.set_page_config(page_title="Ruttplanerare Pro - Tvätteri", layout="wide")
-st.title("🚛 Ruttplanerare Pro: Massplanering & Karta")
+# --- Inställningar ---
+st.set_page_config(page_title="Ruttplanerare", layout="wide")
+st.title("🚛 Din Ruttplanerare")
 
-# --- Logik för ruttberäkning ---
-def calculate_routes(stops, vehicle_caps):
-    remaining = stops.copy()
-    all_routes = []
-    
-    for cap in vehicle_caps:
-        if not remaining: break
-        current_route = []
-        current_load = 0
-        # Startposition (Tvätteriet - Göteborg Centrum ca)
-        curr_lat, curr_lon = 57.7089, 11.9746 
-        
-        while remaining:
-            # Hitta närmsta stopp
-            dists = [np.sqrt((s['lat']-curr_lat)**2 + (s['lon']-curr_lon)**2) for s in remaining]
-            nearest_idx = np.argmin(dists)
-            nearest_stop = remaining[nearest_idx]
-            
-            if current_load + nearest_stop['demand'] <= cap:
-                current_route.append(nearest_stop)
-                current_load += nearest_stop['demand']
-                curr_lat, curr_lon = nearest_stop['lat'], nearest_stop['lon']
-                remaining.pop(nearest_idx)
-            else:
-                break
-        all_routes.append(current_route)
-    return all_routes, remaining
+# --- 1. Fordonsinställningar (Här bestämmer DU kapaciteten) ---
+st.sidebar.header("🚚 Dina Fordon")
+antal_bilar = st.sidebar.number_input("Hur många bilar kör idag?", min_value=1, max_value=10, value=2)
 
-# --- Sidebar: Fordon ---
-st.sidebar.header("🚚 Fordonsflotta")
-stora = st.sidebar.number_input("Lastbilar (12 vagnar)", 0, 10, 2)
-sma = st.sidebar.number_input("Lätta lastbilar (6 vagnar)", 0, 10, 1)
-v_caps = ([12] * stora) + ([6] * sma)
+fordons_data = []
+for i in range(int(antal_bilar)):
+    cap = st.sidebar.number_input(f"Kapacitet bil {i+1} (antal vagnar)", min_value=1, value=10, key=f"cap_{i}")
+    fordons_data.append({"id": i+1, "cap": cap})
 
-# --- Huvudfönster: Massinmatning ---
-st.subheader("1. Klistra in adresser")
-st.info("Format: Namn, Ut, In (en per rad). Exempel: Hotell Gothia, 5, 5")
-bulk_input = st.text_area("Adresslista", height=200, placeholder="Gothia Towers, 5, 5\nRestaurang Linné, 2, 2\nSahlgrenska, 10, 8")
+# --- 2. Inmatning av adresser ---
+st.subheader("📍 Lägg till adresser")
+st.info("Klistra in adresser i formatet: **Namn, Antal vagnar** (en per rad)")
+bulk_input = st.text_area("Exempel:\nHotell A, 5\nRestaurang B, 3", height=150)
 
-if st.button("🚀 Planera och optimera rutter", type="primary"):
+if st.button("🚀 Planera rutter", type="primary"):
     if bulk_input:
-        processed_stops = []
-        lines = bulk_input.split('\n')
+        stopp = []
+        rader = bulk_input.split('\n')
         
-        for i, line in enumerate(lines):
-            if ',' in line:
-                parts = line.split(',')
+        for rad in rader:
+            if ',' in rad:
                 try:
-                    name = parts[0].strip()
-                    out_v = int(parts[1].strip())
-                    in_v = int(parts[2].strip())
-                    # Slumpa koordinater runt Gbg för kartan
-                    lat = 57.70 + np.random.uniform(-0.05, 0.05)
-                    lon = 11.97 + np.random.uniform(-0.05, 0.05)
-                    processed_stops.append({"name": name, "demand": max(out_v, in_v), "lat": lat, "lon": lon})
+                    delar = rad.split(',')
+                    namn = delar[0].strip()
+                    vagnar = int(delar[1].strip())
+                    # Skapar slumpmässiga koordinater i Gbg för kartan
+                    lat = 57.70 + np.random.uniform(-0.04, 0.04)
+                    lon = 11.97 + np.random.uniform(-0.04, 0.04)
+                    stopp.append({"namn": namn, "vagnar": vagnar, "lat": lat, "lon": lon})
                 except:
-                    st.error(f"Kunde inte läsa rad: {line}")
+                    st.error(f"Kunde inte läsa raden: {rad}")
 
-        if processed_stops:
-            routes, left_over = calculate_routes(processed_stops, v_caps)
+        if stopp:
+            # --- Ruttlogik (Sortering) ---
+            sorterade_stopp = stopp.copy()
+            rutter = {f"Bil {f['id']}": [] for f in fordons_data}
             
-            # --- VISUALISERING: KARTA ---
-            st.subheader("2. Kartöversikt")
-            map_data = []
-            for i, r in enumerate(routes):
-                for stop in r:
-                    map_data.append({"lat": stop['lat'], "lon": stop['lon'], "Bil": f"Bil {i+1}"})
+            for bil in fordons_data:
+                nuvarande_last = 0
+                while sorterade_stopp:
+                    nasta = sorterade_stopp[0]
+                    if nuvarande_last + nasta['vagnar'] <= bil['cap']:
+                        rutter[f"Bil {bil['id']}"].append(nasta)
+                        nuvarande_last += nasta['vagnar']
+                        sorterade_stopp.pop(0)
+                    else:
+                        break
             
-            if map_data:
-                df_map = pd.DataFrame(map_data)
-                st.map(df_map, color="#FF4B4B" if len(routes) > 0 else "#000000")
+            # --- Visa Karta ---
+            st.subheader("🗺️ Kartöversikt")
+            kart_data = []
+            for bil_namn, stopp_lista in rutter.items():
+                for s in stopp_lista:
+                    kart_data.append({"lat": s['lat'], "lon": s['lon'], "Bil": bil_namn})
             
-            # --- KÖRLISTOR ---
-            st.subheader("3. Färdiga Körlistor")
-            cols = st.columns(len([r for r in routes if r]))
-            
-            for i, r in enumerate(routes):
-                if not r: continue
-                with cols[i % len(cols)]:
-                    st.success(f"**BIL {i+1} ({'Stor' if v_caps[i]==12 else 'Liten'})**")
-                    st.write("📍 *Start: Tvätteriet*")
-                    for j, s in enumerate(r):
-                        st.write(f"{j+1}. **{s['name']}** ({s['demand']} vagn)")
-                    st.write("🏁 *Mål: Tvätteriet*")
-                    
-                    # SMS-knapp/text
-                    sms_list = [s['name'] for s in r]
-                    st.text_area(f"Kopiera SMS Bil {i+1}", f"RUTT BIL {i+1}: Start -> " + " -> ".join(sms_list) + " -> Mål", height=100)
-            
-            if left_over:
-                st.warning(f"⚠️ {len(left_over)} stopp fick inte plats! Lägg till fler bilar.")
+            if kart_data:
+                st.map(pd.DataFrame(kart_data))
+
+            # --- Visa Körlistor ---
+            st.subheader("📋 Färdiga Körlistor")
+            cols = st.columns(len(rutter))
+            for i, (bil_namn, stopp_lista) in enumerate(rutter.items()):
+                with cols[i]:
+                    st.success(f"**{bil_namn.upper()}**")
+                    if not stopp_lista:
+                        st.write("Inga stopp tilldelade.")
+                    else:
+                        for j, s in enumerate(stopp_lista):
+                            st.write(f"{j+1}. **{s['namn']}** ({s['vagnar']} vagnar)")
+                        
+                        # Kopierbar text
+                        txt = f"RUTT {bil_namn}: " + " -> ".join([s['namn'] for s in stopp_lista])
+                        st.text_area("Kopiera rutt:", txt, height=70, key=f"copy_{i}")
+
+            if sorterade_stopp:
+                st.warning(f"⚠️ {len(sorterade_stopp)} stopp hanns inte med! Du behöver fler eller större bilar.")
     else:
-        st.error("Klistra in adresser först!")
-
-# --- VIKTIGT FÖR ATT DET SKA FUNKA ---
-# Se till att din requirements.txt bara innehåller:
-# streamlit
-# pandas
-# numpy
+        st.warning("Klistra in några adresser först!")
