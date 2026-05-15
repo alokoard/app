@@ -3,33 +3,41 @@ import pandas as pd
 import numpy as np
 from geopy.geocoders import Nominatim
 import time
+import re
 
 # Inställningar
 st.set_page_config(page_title="Ruttplanerare Pro", layout="wide")
-st.title("🚛 Ruttplanerare med Prioritering")
+st.title("🚛 Ruttplanerare: Adresser & Koordinater")
 
 # Fixa geokodning
-geolocator = Nominatim(user_agent="textilia_gbg_v2")
+geolocator = Nominatim(user_agent="textilia_gbg_v3")
 
 # --- 1. Fordonsinställningar ---
 st.sidebar.header("🚚 Dina Fordon")
 antal_bilar = st.sidebar.number_input("Antal bilar", 1, 10, 2)
 fordons_data = []
 for i in range(int(antal_bilar)):
-    # Unikt ID för varje input-ruta (fixar DuplicateElementKey)
-    cap = st.sidebar.number_input(f"Kapacitet bil {i+1}", 1, 100, 10, key=f"bil_cap_input_{i}")
+    cap = st.sidebar.number_input(f"Kapacitet bil {i+1}", 1, 100, 10, key=f"v_cap_{i}")
     fordons_data.append({"id": i+1, "cap": cap})
 
 # --- 2. Inmatning ---
-st.subheader("📍 Adresslista")
+st.subheader("📍 Lägg till stopp")
 st.info("""
-**Format:** Adress - Antal  
-**Prioritera:** Lägg till ett **!** först på raden för att sätta stoppet först i kön.
-*Exempel:* `! Västra Hamngatan 20 - 5` (Körs först)  
-`Drottninggatan 5 - 2` (Körs efter prio)
+**Du kan skriva på tre sätt:**
+1. Vanlig adress: `Storgatan 1 - 5`
+2. Koordinater: `57.70, 11.97 - 2`
+3. Namn & Koordinat: `Kundnamn: 57.70, 11.97 - 3`
+*(Använd **!** först för att prioritera)*
 """)
 
-bulk_input = st.text_area("Klistra in adresser här", height=200)
+bulk_input = st.text_area("Klistra in din lista här", height=250)
+
+def extract_coords(text):
+    """Kollar om texten innehåller lat, lon"""
+    match = re.search(r"(\d+\.\d+),\s*(\d+\.\d+)", text)
+    if match:
+        return float(match.group(1)), float(match.group(2))
+    return None
 
 if st.button("🚀 Planera rutter", type="primary"):
     if bulk_input:
@@ -39,50 +47,55 @@ if st.button("🚀 Planera rutter", type="primary"):
         progress_bar = st.progress(0)
         
         for idx, rad in enumerate(rader):
-            # Kolla prioritering
-            is_prio = False
-            rensad_rad = rad
-            if rad.startswith('!'):
-                is_prio = True
-                rensad_rad = rad.replace('!', '').strip()
+            is_prio = rad.startswith('!')
+            rensad_rad = rad.replace('!', '').strip()
             
-            # Parsing av antal
-            namn = rensad_rad
+            # 1. Kolla antal vagnar (efter bindestreck)
             vagnar = 1
+            huvud_del = rensad_rad
             if " - " in rensad_rad:
                 try:
-                    delar = rensad_rad.split(" - ")
-                    namn = delar[0].strip()
-                    vagnar = int(delar[1].strip())
+                    huvud_del, vagn_str = rensad_rad.rsplit(" - ", 1)
+                    vagnar = int(vagn_str.strip())
                 except: pass
 
-            try:
-                # Geokodning
-                sok_term = namn if "göteborg" in namn.lower() else f"{namn}, Göteborg"
-                location = geolocator.geocode(sok_term, timeout=10)
-                
-                if location:
-                    stopp.append({
-                        "namn": namn,
-                        "vagnar": vagnar,
-                        "prio": is_prio,
-                        "lat": location.latitude,
-                        "lon": location.longitude
-                    })
-                else:
-                    st.error(f"Hittade inte: {namn}")
-                
-                time.sleep(0.8) # Paus för att inte bli blockerad av karttjänsten
-            except Exception as e:
-                st.error(f"Fel vid {namn}: {e}")
+            # 2. Kolla efter koordinater i texten
+            coords = extract_coords(huvud_del)
+            
+            namn_display = huvud_del
+            lat, lon = None, None
+
+            if coords:
+                lat, lon = coords
+                # Om det finns ett namn före koordinaterna (t.ex. Kund: 57.7, 11.9)
+                if ":" in huvud_del:
+                    namn_display = huvud_del.split(":")[0].strip()
+            else:
+                # 3. Om inga koordinater finns, sök med Geopy
+                try:
+                    sok_term = huvud_del if "göteborg" in huvud_del.lower() else f"{huvud_del}, Göteborg"
+                    location = geolocator.geocode(sok_term, timeout=10)
+                    if location:
+                        lat, lon = location.latitude, location.longitude
+                    time.sleep(0.7) # För att inte bli bannad från karttjänsten
+                except: pass
+
+            if lat and lon:
+                stopp.append({
+                    "namn": namn_display,
+                    "vagnar": vagnar,
+                    "prio": is_prio,
+                    "lat": lat,
+                    "lon": lon
+                })
+            else:
+                st.error(f"❌ Kunde inte hitta: {huvud_del}")
             
             progress_bar.progress((idx + 1) / len(rader))
 
         if stopp:
-            # --- RUTT-LOGIK MED PRIORITERING ---
-            # Vi sorterar så att alla med prio=True kommer först
+            # --- RUTT-LOGIK ---
             sorterade_stopp = sorted(stopp, key=lambda x: x['prio'], reverse=True)
-            
             rutter = {f"Bil {f['id']}": [] for f in fordons_data}
             
             for bil in fordons_data:
@@ -94,16 +107,14 @@ if st.button("🚀 Planera rutter", type="primary"):
                         nuvarande_last += s['vagnar']
                         sorterade_stopp.remove(s)
             
-            # --- Visa Karta ---
+            # --- Karta ---
             st.subheader("🗺️ Kartöversikt")
-            map_points = []
-            for bil_namn, s_lista in rutter.items():
-                for s in s_lista:
-                    map_points.append({"lat": s['lat'], "lon": s['lon'], "Bil": bil_namn})
-            if map_points:
-                st.map(pd.DataFrame(map_points))
+            map_df = pd.DataFrame([{"lat": s['lat'], "lon": s['lon'], "Bil": b} 
+                                 for b, lista in rutter.items() for s in lista])
+            if not map_df.empty:
+                st.map(map_df)
 
-            # --- Visa Körlistor ---
+            # --- Körlistor ---
             st.subheader("📋 Körlistor")
             cols = st.columns(len(rutter))
             for i, (bil_namn, s_lista) in enumerate(rutter.items()):
@@ -113,14 +124,14 @@ if st.button("🚀 Planera rutter", type="primary"):
                         st.write("Inga stopp.")
                     else:
                         for j, s in enumerate(s_lista):
-                            prio_mark = "⭐ **PRIO** -" if s['prio'] else ""
-                            st.write(f"{j+1}. {prio_mark} {s['namn']} ({s['vagnar']} st)")
+                            prio_icon = "⭐ " if s['prio'] else ""
+                            st.write(f"{j+1}. {prio_icon}{s['namn']} ({s['vagnar']} st)")
                         
-                        # SMS-text (Här är key fixad så den är unik)
-                        txt = f"{bil_namn}:\n" + "\n".join([f"{j+1}. {'(PRIO) ' if s['prio'] else ''}{s['namn']}" for j, s in enumerate(s_lista)])
-                        st.text_area("Kopiera SMS:", txt, height=100, key=f"sms_output_{i}")
+                        # SMS-format
+                        sms_text = f"{bil_namn}:\n" + "\n".join([f"{n+1}. {'(PRIO) ' if s['prio'] else ''}{s['namn']} - vagnar: {s['vagnar']}" for n, s in enumerate(s_lista)])
+                        st.text_area("Kopiera SMS:", sms_text, height=120, key=f"sms_{i}")
 
             if sorterade_stopp:
                 st.warning(f"⚠️ {len(sorterade_stopp)} adresser fick inte plats.")
     else:
-        st.warning("Skriv in adresser!")
+        st.warning("Skriv in adresser eller koordinater!")
